@@ -1,5 +1,13 @@
 module HarmonicChangepoint
 
-# Write your package code here.
+using LinearAlgebra
+using Random, Distributions
+using StatsFuns: logsumexp
+
+include("functions.jl")
+export pwlr
+export simparams
+export simdata
+export harmonicdesign
 
 end
