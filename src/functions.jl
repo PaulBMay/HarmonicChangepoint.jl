@@ -1,117 +1,251 @@
-function sampleβ!(params, y, X, priors)
-
+function sampleβ!(params, buffer, Y, X, priors)
+    
+    # dimensions
     nsegments = length(params.intervals) - 1
     p = size(X,2)
+    r = size(Y,2)
 
-    for k in 1:nsegments
+    # Allocation buffers
+    XtX = buffer.XtX
+    XtY = buffer.XtY
+    XtYU = buffer.XtYU
+    Qp = buffer.Qp
+    U = buffer.U
+    d = buffer.d
+    βtilde = buffer.βtilde
+    μp = buffer.μp
+    z = buffer.z
 
+    # Loop through piecewice segments
+    @views for k in 1:nsegments
+
+        # Subset relevant quants
         indk = (params.intervals[k]+1):params.intervals[k+1]
+        Yk = Y[indk,:]
+        Xk = X[indk,:]
+        Σk = params.Σ[:,:,k]
+        Uk = U[:,:,k]
+        dk = d[:,k]
 
-        yk = view(y, indk, :)
-        Xk = view(X, indk, :)
-        σₖ² = view(params.σ², k)
+        # Compute eigenvalue decomp
+        copyto!(Uk, Σk)
+        dktemp, _ = LAPACK.syev!('V', 'U', Uk)
+        dk .= dktemp
 
-        Qpost = priors.β.Q + (Xk'*Xk) ./ σₖ²
-        Qpostchol = cholesky(Symmetric(Qpost))
+        # X^TX, X^TY, X^TYU
+        mul!(XtX, Xk', Xk)
+        mul!(XtY, Xk', Yk)
+        mul!(XtYU, XtY, Uk)
 
-        μpost = Qpostchol \ (Xk'*yk) ./ σₖ²
+        # Loop through responses
+        for ℓ in 1:r
+            # Posterior precision
+            copyto!(Qp, priors.β.Q)
+            @. Qp += (1/dk[ℓ])*XtX
+            QpU = cholesky!(Qp)
+            # Posterior mean
+            ldiv!(μp, QpU', XtYU[:,ℓ])
+            ldiv!(QpU, μp)
+            # Random variation
+            z.= randn(p)
+            ldiv!(QpU, z)
+            # Write result
+            @. βtilde[:,ℓ] = μp + z
+        end
 
-        params.β[:,k] = μpost + Qpostchol.U \ randn(p)
+        # Unwhiten
+        mul!(params.β[:,:,k], βtilde, Uk')
 
     end   
 
 end
 
-function sampleσ²!(params, y, X, priors)
-
+function sampleΣ!(params, buffer, Y, X, priors)
+    # Dimensions
     nsegments = length(params.intervals) - 1
-
+    r = size(Y,2)
+    # Allocation buffers
+    Scalep = buffer.Scalep
+    resid = buffer.resid
+    # Loop through segments
     for k in 1:nsegments
-
+        # Slice relevant segment
         indk = (params.intervals[k]+1):params.intervals[k+1]
-
-        yk = view(y, indk, :)
+        Yk = view(Y, indk, :)
         Xk = view(X, indk, :)
-        βk = view(params.β, :, k)
-
-        residk = yk - Xk*βk
-        ssek = sum(residk.^2)
-
-        postshape = length(indk)/2 + priors.σ².shape
-        postscale = ssek/2 + priors.σ².scale
-
-        postdist = InverseGamma(postshape, postscale)
-
-        params.σ²[k] = rand(postdist)
-
+        residk = view(resid, indk, :)
+        βk = view(params.β, :, :, k)
+        # Posterior scale and df for IW
+        mul!(residk, Xk, βk, -1.0, 0.0)  # residk .= -Xk*βk
+        residk .+= Yk
+        mul!(Scalep, residk', residk)
+        Scalep .+= priors.Σ.Scale
+        dfp = length(indk) + priors.Σ.df 
+        # Sample
+        postdist = InverseWishart(dfp, Scalep)
+        params.Σ[:,:,k] .= rand(postdist)
     end   
-
 end
 
-bicumsum(x, y) = cumsum(x[1:(end-1)]) + reverse(cumsum(reverse(y[2:end])))
+function bicumsum!(out, x, y)
 
-function samplec!(params, y, X)
+    n = length(x)
+    cumsumx = 0.0
+    for i in 1:(n-1)
+        cumsumx += x[i]
+        out[i] = cumsumx
+    end
+    revsum = 0.0
+    for i in n:-1:2
+        revsum += y[i]
+        out[i] += revsum
+    end
+end
 
+function rcat(probs::AbstractVector)
+    u = rand()                  # uniform [0,1)
+    csum = 0.0
+    for (i, p) in enumerate(probs)
+        csum += p
+        if u <= csum
+            return i
+        end
+    end
+    return length(probs)         # safety in case of rounding errors
+end
+
+function samplec!(params, buffer, Y, X)
+    # Dimensions
     nbreaks = length(params.intervals) - 2
-
-    for j in 1:nbreaks
-
+    r = size(Y,2)
+    # Allocation buffers
+    U = buffer.U
+    d = buffer.d
+    resid = buffer.resid
+    residU = buffer.residU
+    lll = buffer.lll
+    llr = buffer.llr
+    logits = buffer.logits
+    probs = buffer.probs
+    # Loop through breaks
+    @views for j in 1:nbreaks
+        # Subset relevant quants
         lb = params.intervals[j] + 1
         ub = params.intervals[j+2]
-
         indj = lb:ub
 
-        yj = @view y[indj]
-        Xj = @view X[indj,:]
-        βleft = @view params.β[:,j]
-        βright = @view params.β[:,j+1]
-        σ²left = params.σ²[j]
-        σ²right = params.σ²[j+1]
+        Yj = Y[indj,:]
+        Xj = X[indj,:]
+        residj = resid[indj,:]
+        residUj = residU[indj,:]
+        lllj = lll[indj]
+        llrj = llr[indj]
+        logitsj = logits[indj]
+        probsj = probs[indj]
+        βleft = params.β[:,:,j]
+        βright = params.β[:,:,j+1]
+        Uleft = U[:,:,j]
+        Uright = U[:,:,j+1]
+        dleft = d[:,j]
+        dright = d[:,j+1]
+        
+        # Left log-likes
+        mul!(residj, Xj, βleft, -1.0, 0.0) 
+        residj .+= Yj
+        mul!(residUj, residj, Uleft)
+        residUj .^= 2
+        for ℓ in 1:r
+            @. residUj[:,ℓ] /= dleft[ℓ]
+        end
+        lllj .=  vec(sum(residUj, dims = 2)) .+ sum(log.(dleft))
+        lllj .*= -0.5
+        # Right log-likes
+        mul!(residj, Xj, βright, -1.0, 0.0) 
+        residj .+= Yj
+        mul!(residUj, residj, Uright)
+        residUj .^= 2
+        for ℓ in 1:r
+            @. residUj[:,ℓ] /= dright[ℓ]
+        end
+        llrj .=  vec(sum(residUj, dims = 2)) .+ sum(log.(dright))
+        llrj .*= -0.5
 
-        loglikeleft = -0.5*( (yj - Xj*βleft).^2 / σ²left .+ log(σ²left) )
-        loglikeright = -0.5*( (yj - Xj*βright).^2 / σ²right .+ log(σ²right) )
-
-        logits = bicumsum(loglikeleft, loglikeright)
-
-        probs = exp.(logits .- logsumexp(logits))
-
-        params.intervals[j+1] = indj[rand(Categorical(probs))]
+        bicumsum!(logitsj, lllj, llrj)
+        softmax!(probsj, logitsj)
+        params.intervals[j+1] = indj[rcat(probsj)]
 
     end
 
 end
 
-function logdensity!(ld, params, y, X)
+function logdensity!(ld, params, buffer, Y, X)
 
     nsegments = length(params.intervals) - 1
+    r = size(Y,2)
 
-    for k in 1:nsegments
+    # Allocation buffers
+    U = buffer.U
+    d = buffer.d
+    resid = buffer.resid
+    residU = buffer.residU
+
+    @views for k in 1:nsegments
 
         indk = (params.intervals[k]+1):params.intervals[k+1]
-        yk = view(y, indk, :)
-        Xk = view(X, indk, :)
-        βk = view(params.β, :, k)
-        σₖ² = params.σ²[k]
+        Yk = Y[indk,:]
+        Xk = X[indk,:]
+        residk = resid[indk,:]
+        residUk = residU[indk,:]
+        βk = params.β[:,:,k]
+        Uk = U[:,:,k]
+        dk = d[:,k]
 
-        ld[indk] = -0.5*( (yk - Xk*βk).^2 ./ σₖ² .+ log(σₖ²) )
+        mul!(residk, Xk, βk, -1.0, 0.0) 
+        residk .+= Yk
+        mul!(residUk, residk, Uk)
+        residUk .^= 2
+        for ℓ in 1:r
+            @. residUk[:,ℓ] /= dk[ℓ]
+        end
+        ld[indk] .=  -0.5*(vec(sum(residUk, dims = 2)) .+ sum(log.(dk)) )
 
     end
 
 end
 
-function pwlr(y, X, w, priors, params, nsamps; getelpd::Bool = true)
+function pwlr(Y::AbstractMatrix, X, w, priors, params, nsamps; getelpd::Bool = true)
 
     n, p = size(X)
+    r = size(Y,2)
     nsegments = length(params.intervals) - 1
 
     samples = (
-        β = zeros(p, nsegments, nsamps),
-        σ² = zeros(nsegments, nsamps),
+        β = zeros(p, r, nsegments, nsamps),
+        Σ = zeros(r, r, nsegments, nsamps),
         intervals = zeros(nsegments+1, nsamps)
     )
 
+    buffer = (
+        XtX = zeros(p,p),
+        XtY = zeros(p,r),
+        XtYU = zeros(p,r),
+        Qp = zeros(p,p),
+        U = zeros(r,r,nsegments),
+        d = zeros(r,nsegments),
+        βtilde = zeros(p,r),
+        μp = zeros(p),
+        z = zeros(p),
+        Scalep = zeros(r,r),
+        resid = zeros(n,r),
+        residU = zeros(n,r),
+        lll = zeros(n),
+        llr = zeros(n),
+        logits = zeros(n),
+        probs = zeros(n)
+    )
+
     winvsqrt = (1 ./ sqrt.(w))
-    ys =  winvsqrt .* y
+    Ys =  winvsqrt .* Y
     Xs = winvsqrt .* X
     
     if getelpd
@@ -119,24 +253,24 @@ function pwlr(y, X, w, priors, params, nsamps; getelpd::Bool = true)
     end
 
     for i in 1:nsamps
-        sampleβ!(params, ys, Xs, priors)
-        sampleσ²!(params, ys, Xs, priors)
-        samplec!(params, ys, Xs)
+        sampleΣ!(params, buffer, Ys, Xs, priors)
+        sampleβ!(params, buffer, Ys, Xs, priors)
+        samplec!(params, buffer, Ys, Xs)
 
-        samples.β[:,:,i] = params.β
-        samples.σ²[:,i] = params.σ²
+        samples.β[:,:,:,i] = params.β
+        samples.Σ[:,:,:,i] = params.Σ
         samples.intervals[:,i] = params.intervals
 
         if getelpd
             ldi = view(ld, :, i)
-            logdensity!(ldi, params, ys, Xs)
+            logdensity!(ldi, params, buffer, Ys, Xs)
         end
     end
 
     elpd = zeros(n)
     if getelpd
-        elpd += vec(logsumexp(ld, dims = 2)) .- log(nsamps)
-        elpd -= vec(var(ld, dims = 2))
+        elpd .+= vec(logsumexp(ld, dims = 2)) .- log(nsamps)
+        elpd .-= vec(var(ld, dims = 2))
     end
 
     return samples, elpd
@@ -145,7 +279,8 @@ end
 
 function simparams(X, priors, nbreaks; σcz = 1.0)
 
-    n,p = size(X)
+    n, p = size(X)
+    r = size(priors.Σ.Scale,1)
     nsegments = nbreaks + 1
 
     cz = σcz*randn(nsegments)
@@ -156,17 +291,17 @@ function simparams(X, priors, nbreaks; σcz = 1.0)
     intervals = [0; c; n]
 
     βdist = MvNormalCanon(priors.β.Q)
-    σ²dist = InverseGamma(priors.σ².shape, priors.σ².scale)
+    Σdist = InverseWishart(priors.Σ.df, priors.Σ.Scale)
 
-    params = (β = zeros(p, nsegments), σ² = zeros(nsegments), intervals = intervals)
+    params = (β = zeros(p, r, nsegments), Σ = zeros(r,r,nsegments), intervals = intervals)
 
     for k in 1:nsegments
 
-        βk = rand(βdist)
-        σ²k = rand(σ²dist)
+        βk = rand(βdist, r)
+        Σk = rand(Σdist)
 
-        params.β[:,k] = βk
-        params.σ²[k] = σ²k
+        params.β[:,:,k] .= βk
+        params.Σ[:,:,k] .= Σk
 
     end
 
@@ -177,18 +312,19 @@ end
 function simdata(X, w, params)
 
     n = size(X,1)
+    r = size(params.Σ,1)
     nsegments = length(params.intervals) - 1
 
-    y = zeros(n)
+    Y = zeros(n,r)
 
-    for k in 1:nsegments
-
+    @views for k in 1:nsegments
         indk = (params.intervals[k]+1):params.intervals[k+1]
-        y[indk] = @views X[indk,:]*params.β[:,k] + sqrt.(params.σ²[k] ./ w[indk]) .* randn(length(indk))
-
+        error_dist = MvNormal(params.Σ[:,:,k])
+        error = sqrt.(1 ./ w[indk]) .* rand(error_dist, length(indk))'
+        Y[indk,:] = X[indk,:]*params.β[:,:,k] + error
     end
 
-    return y
+    return Y
 
 end
 

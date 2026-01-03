@@ -1,8 +1,9 @@
 module HarmonicChangepoint
 
 using LinearAlgebra
+using LinearAlgebra.LAPACK
 using Random, Distributions
-using StatsFuns: logsumexp
+using StatsFuns: logsumexp, softmax!
 
 include("functions.jl")
 export pwlr
