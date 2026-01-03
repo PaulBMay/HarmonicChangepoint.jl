@@ -42,13 +42,13 @@ function sampleβ!(params, buffer, Y, X, priors)
             # Posterior precision
             copyto!(Qp, priors.β.Q)
             @. Qp += (1/dk[ℓ])*XtX
-            QpU = cholesky!(Qp)
+            Qpc = cholesky!(Qp)
             # Posterior mean
-            ldiv!(μp, QpU', XtYU[:,ℓ])
-            ldiv!(QpU, μp)
+            ldiv!(μp, Qpc, XtYU[:,ℓ])
+            μp ./= dk[ℓ]
             # Random variation
-            z.= randn(p)
-            ldiv!(QpU, z)
+            z .= randn(p)
+            ldiv!(Qpc.U, z)
             # Write result
             @. βtilde[:,ℓ] = μp + z
         end
@@ -68,16 +68,16 @@ function sampleΣ!(params, buffer, Y, X, priors)
     Scalep = buffer.Scalep
     resid = buffer.resid
     # Loop through segments
-    for k in 1:nsegments
+    @views for k in 1:nsegments
         # Slice relevant segment
         indk = (params.intervals[k]+1):params.intervals[k+1]
-        Yk = view(Y, indk, :)
-        Xk = view(X, indk, :)
-        residk = view(resid, indk, :)
-        βk = view(params.β, :, :, k)
+        Yk = Y[indk,:]
+        Xk = X[indk,:]
+        residk = resid[indk,:]
+        βk = params.β[:,:,k]
         # Posterior scale and df for IW
-        mul!(residk, Xk, βk, -1.0, 0.0)  # residk .= -Xk*βk
-        residk .+= Yk
+        residk .= Yk
+        mul!(residk, Xk, βk, -1.0, 1.0)  # residk .= -Xk*βk
         mul!(Scalep, residk', residk)
         Scalep .+= priors.Σ.Scale
         dfp = length(indk) + priors.Σ.df 
@@ -88,17 +88,18 @@ function sampleΣ!(params, buffer, Y, X, priors)
 end
 
 function bicumsum!(out, x, y)
-
     n = length(x)
-    cumsumx = 0.0
-    for i in 1:(n-1)
-        cumsumx += x[i]
-        out[i] = cumsumx
+    @assert length(out) >= n - 1
+    fill!(out, 0.0)
+    leftsum = 0.0
+    rightsum = 0.0
+    @inbounds for i in 1:(n-1)
+        leftsum += x[i]
+        out[i] += leftsum
     end
-    revsum = 0.0
-    for i in n:-1:2
-        revsum += y[i]
-        out[i] += revsum
+    @inbounds for i in n:(-1):2
+        rightsum += y[i]
+        out[i-1] += rightsum
     end
 end
 
@@ -140,8 +141,8 @@ function samplec!(params, buffer, Y, X)
         residUj = residU[indj,:]
         lllj = lll[indj]
         llrj = llr[indj]
-        logitsj = logits[indj]
-        probsj = probs[indj]
+        logitsj = logits[lb:(ub-1)]
+        probsj = probs[lb:(ub-1)]
         βleft = params.β[:,:,j]
         βright = params.β[:,:,j+1]
         Uleft = U[:,:,j]
@@ -244,9 +245,8 @@ function pwlr(Y::AbstractMatrix, X, w, priors, params, nsamps; getelpd::Bool = t
         probs = zeros(n)
     )
 
-    winvsqrt = (1 ./ sqrt.(w))
-    Ys =  winvsqrt .* Y
-    Xs = winvsqrt .* X
+    Ys =  sqrt.(w) .* Y
+    Xs = sqrt.(w) .* X
     
     if getelpd
         ld = zeros(n, nsamps)
