@@ -214,16 +214,25 @@ function logdensity!(ld, params, buffer, Y, X)
 
 end
 
-function pwlr(Y::AbstractMatrix, X, w, priors, params, nsamps; getelpd::Bool = true)
+# `store`  : archive the per-iteration β and changepoint `intervals` (needed to
+#            summarise the posterior; set false for burn-in, where the draws are
+#            thrown away). `storeΣ` : also archive the per-iteration Σ (only the
+#            current params.Σ is used during sampling, so downstream code that
+#            never inspects samples.Σ can set this false to skip the largest
+#            allocation). Skipping storage / elpd consumes no RNG, so the chain
+#            is bit-identical regardless of these flags.
+function pwlr(Y::AbstractMatrix, X, w, priors, params, nsamps;
+              getelpd::Bool = true, store::Bool = true, storeΣ::Bool = true)
 
     n, p = size(X)
     r = size(Y,2)
     nsegments = length(params.intervals) - 1
 
+    # A 0-length sample axis means "don't archive this quantity" (no big alloc).
     samples = (
-        β = zeros(p, r, nsegments, nsamps),
-        Σ = zeros(r, r, nsegments, nsamps),
-        intervals = zeros(nsegments+1, nsamps)
+        β = zeros(p, r, nsegments, store ? nsamps : 0),
+        Σ = zeros(r, r, nsegments, storeΣ ? nsamps : 0),
+        intervals = zeros(nsegments+1, store ? nsamps : 0)
     )
 
     buffer = (
@@ -257,9 +266,13 @@ function pwlr(Y::AbstractMatrix, X, w, priors, params, nsamps; getelpd::Bool = t
         sampleβ!(params, buffer, Ys, Xs, priors)
         samplec!(params, buffer, Ys, Xs)
 
-        samples.β[:,:,:,i] = params.β
-        samples.Σ[:,:,:,i] = params.Σ
-        samples.intervals[:,i] = params.intervals
+        if store
+            samples.β[:,:,:,i] = params.β
+            samples.intervals[:,i] = params.intervals
+        end
+        if storeΣ
+            samples.Σ[:,:,:,i] = params.Σ
+        end
 
         if getelpd
             ldi = view(ld, :, i)
