@@ -74,3 +74,63 @@ function seg_cumll_bwd(y, t, ρ, σ2g, v)
     @inbounds for k in 1:n; out[n-k+1] = cr[k]; end
     out
 end
+
+# -------------------- allocation-free hot-loop variants ----------------------
+# Reusable length-n scratch for the scalar OU recursions. The Gibbs sweep calls
+# the Kalman filter/FFBS O(bands × segments) times per iteration; routing all of
+# them through one OUWork removes the per-call array allocations.
+struct OUWork
+    a::Vector{Float64}; R::Vector{Float64}; m::Vector{Float64}
+    P::Vector{Float64}; cumll::Vector{Float64}
+    yr::Vector{Float64}; tr::Vector{Float64}; vr::Vector{Float64}   # reversed scratch (bwd)
+end
+OUWork(n::Int) = OUWork((zeros(n) for _ in 1:8)...)
+
+# Forward filter into ws (uses entries 1:length(y)); returns total loglik. The
+# per-step cumulative loglik lands in ws.cumll. y, t, v may be views.
+function kalman_forward!(ws::OUWork, y, t, ρ, σ2g, v)
+    n = length(y); a=ws.a; R=ws.R; m=ws.m; P=ws.P; cumll=ws.cumll
+    ll = 0.0
+    @inbounds for i in 1:n
+        if i == 1
+            a[i] = 0.0; R[i] = σ2g
+        else
+            φ = exp(-(t[i]-t[i-1])/ρ)
+            a[i] = φ*m[i-1]; R[i] = φ^2*P[i-1] + σ2g*(1-φ^2)
+        end
+        f = y[i] - a[i]; S = R[i] + v[i]
+        ll += -0.5*(log(2π*S) + f^2/S); cumll[i] = ll
+        K = R[i]/S; m[i] = a[i] + K*f; P[i] = (1-K)*R[i]
+    end
+    ll
+end
+
+# FFBS draw into g[1:length(y)] using ws as scratch.
+function ffbs_sample!(g, ws::OUWork, y, t, ρ, σ2g, v; rng=Random.default_rng())
+    n = length(y); kalman_forward!(ws, y, t, ρ, σ2g, v)
+    a=ws.a; R=ws.R; m=ws.m; P=ws.P
+    @inbounds begin
+        g[n] = m[n] + sqrt(P[n])*randn(rng)
+        for i in n-1:-1:1
+            φ = exp(-(t[i+1]-t[i])/ρ); J = φ*P[i]/R[i+1]
+            mb = m[i] + J*(g[i+1] - a[i+1]); Pb = P[i] - J^2*R[i+1]
+            g[i] = mb + sqrt(max(Pb,0.0))*randn(rng)
+        end
+    end
+    g
+end
+
+# Suffix marginal loglik into out[1:length(y)] (segment ENDING at n), via the
+# time-reversed filter; reversed series staged in ws.yr/tr/vr.
+function seg_cumll_bwd!(out, ws::OUWork, y, t, ρ, σ2g, v)
+    n = length(y); t1 = t[1]; tn = t[n]
+    @inbounds for k in 1:n
+        out[k] = y[n-k+1]                         # stage reversed y in out briefly
+    end
+    @inbounds for k in 1:n
+        ws.yr[k] = out[k]; ws.tr[k] = -t[n-k+1] + (t1+tn); ws.vr[k] = v[n-k+1]
+    end
+    kalman_forward!(ws, view(ws.yr,1:n), view(ws.tr,1:n), ρ, σ2g, view(ws.vr,1:n))
+    @inbounds for k in 1:n; out[n-k+1] = ws.cumll[k]; end
+    out
+end
