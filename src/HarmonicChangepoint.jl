@@ -11,4 +11,13 @@ export simparams
 export simdata
 export harmonicdesign
 
+# Universal-kriging (OU-GP) changepoint variant — a SEPARATE trend model from
+# pwlr; the within-segment trend is a non-parametric OU Gaussian process.
+include("ou_statespace.jl")
+include("ou_changepoint.jl")
+export ou_gibbs_mv
+export fit_adaptive_mv
+export kalman_forward
+export ffbs_sample
+
 end
