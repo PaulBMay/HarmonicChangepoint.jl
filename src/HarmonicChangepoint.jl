@@ -20,4 +20,10 @@ export fit_adaptive_mv
 export kalman_forward
 export ffbs_sample
 
+# Posterior query of trend value + harmonic coefficients at an arbitrary time
+# (works for both the pwlr and UK/OU-GP fits).
+include("query.jl")
+export query_posterior
+export gpred
+
 end
