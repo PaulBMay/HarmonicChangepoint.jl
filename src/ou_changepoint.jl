@@ -234,10 +234,31 @@ function waic(ld)
     lse .- log(S) .- vec(var(ld, dims=2))
 end
 
-# NON-greedy nb selection: fit nb=0..maxnb, pick argmax(elpd - δ·nb). A poor
-# intermediate nb (e.g. a single break that can't capture a disturbance+recovery)
-# can't abort the ladder. δ is a per-break complexity penalty. Returns (S, nb, elpd).
-function fit_adaptive_mv(Y,t,w,X,ρ,pr,nsamps,nburn; maxnb=3, δ=4.0, rng=Random.default_rng(), gp=true)
+# nb selection by penalized score elpd - δ·nb (δ = per-break complexity penalty).
+# Returns (S, nb, elpd).
+#   greedy=false (default): fit ALL nb=0..maxnb and pick argmax(score). A poor
+#     intermediate nb (e.g. a single break that can't capture a disturbance+
+#     recovery) can't abort the ladder, so an nb whose gain only appears beyond
+#     a non-improving step is still reachable.
+#   greedy=true: climb nb while the score keeps improving, stop at the first
+#     non-improving step. Cheaper (skips higher nb once a break stops paying for
+#     itself) and gives the SAME nb as non-greedy whenever score is unimodal in
+#     nb; only differs on the rare non-monotone pixel (e.g. two separate abrupt
+#     events where one mid break is worse than none but two help).
+function fit_adaptive_mv(Y,t,w,X,ρ,pr,nsamps,nburn; maxnb=3, δ=4.0, rng=Random.default_rng(), gp=true, greedy=false)
+    if greedy
+        Sbest,elpdbest = ou_gibbs_mv(Y,t,w,X,ρ,0,pr,nsamps,nburn; rng=rng, gp=gp)
+        bestnb=0; bestscore=sum(elpdbest)               # score at nb=0 (δ·0)
+        nb=0
+        while nb < maxnb
+            nb += 1
+            S,elpd = ou_gibbs_mv(Y,t,w,X,ρ,nb,pr,nsamps,nburn; rng=rng, gp=gp)
+            sc = sum(elpd) - δ*nb
+            sc > bestscore || break
+            Sbest,elpdbest,bestnb,bestscore = S,elpd,nb,sc
+        end
+        return Sbest, bestnb, sum(elpdbest)
+    end
     fits=Vector{Any}(undef,maxnb+1); score=fill(-Inf,maxnb+1)
     for nb in 0:maxnb
         S,elpd = ou_gibbs_mv(Y,t,w,X,ρ,nb,pr,nsamps,nburn; rng=rng, gp=gp)
