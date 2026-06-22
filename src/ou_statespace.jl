@@ -136,6 +136,27 @@ function kalman_smooth_mean!(g, ws::OUWork, y, t, ρ, σ2g, v)
     g
 end
 
+# Standardized one-step innovations z_i = (y_i - a_i)/sqrt(S_i) of the OU+noise
+# MARGINAL (latent g integrated out) into z[1:length(y)]; returns log|A| =
+# Σ log S_i, where A = σ2g R₀(ρ) + diag(v). Because the gain / innovation-variance
+# recursion is data-independent, inner products give the GLS cross-products under
+# A: Σ_i z^u_i z^v_i = uᵀ A⁻¹ v  (so Σ_i z_i² = yᵀA⁻¹y). Used by the marginalized
+# MAP fit to form XᵀA⁻¹X, XᵀA⁻¹Y, YᵀA⁻¹Y and the marginal log-likelihood.
+function kalman_innov!(z, ws::OUWork, y, t, ρ, σ2g, v)
+    n = length(y); a=ws.a; R=ws.R; m=ws.m; P=ws.P; ld = 0.0
+    @inbounds for i in 1:n
+        if i == 1
+            a[i] = 0.0; R[i] = σ2g
+        else
+            φ = exp(-(t[i]-t[i-1])/ρ); a[i] = φ*m[i-1]; R[i] = φ^2*P[i-1] + σ2g*(1-φ^2)
+        end
+        f = y[i] - a[i]; S = R[i] + v[i]
+        z[i] = f/sqrt(S); ld += log(S)
+        K = R[i]/S; m[i] = a[i] + K*f; P[i] = (1-K)*R[i]
+    end
+    ld
+end
+
 # Suffix marginal loglik into out[1:length(y)] (segment ENDING at n), via the
 # time-reversed filter; reversed series staged in ws.yr/tr/vr.
 function seg_cumll_bwd!(out, ws::OUWork, y, t, ρ, σ2g, v)

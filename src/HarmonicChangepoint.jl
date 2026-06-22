@@ -20,8 +20,9 @@ export fit_adaptive_mv
 export kalman_forward
 export ffbs_sample
 
-# Deterministic MAP / ICM point estimate of the UK changepoint model (σ²g-capped,
-# same S layout as ou_gibbs_mv so query_posterior consumes it unchanged).
+# Deterministic MAP / ICM point estimate of the UK changepoint model, latent G
+# marginalized and parameterized by the GP variance fraction gpfrac ∈ (0,1); same
+# S layout as ou_gibbs_mv (+ a gpfrac field) so query_posterior consumes it as-is.
 include("ou_map.jl")
 export ou_icm_mv
 export fit_map_mv
