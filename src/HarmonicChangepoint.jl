@@ -20,6 +20,12 @@ export fit_adaptive_mv
 export kalman_forward
 export ffbs_sample
 
+# Deterministic MAP / ICM point estimate of the UK changepoint model (σ²g-capped,
+# same S layout as ou_gibbs_mv so query_posterior consumes it unchanged).
+include("ou_map.jl")
+export ou_icm_mv
+export fit_map_mv
+
 # Posterior query of trend value + harmonic coefficients at an arbitrary time
 # (works for both the pwlr and UK/OU-GP fits).
 include("query.jl")

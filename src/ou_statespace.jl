@@ -120,6 +120,22 @@ function ffbs_sample!(g, ws::OUWork, y, t, ρ, σ2g, v; rng=Random.default_rng()
     g
 end
 
+# RTS smoother POSTERIOR MEAN of the latent trend g into g[1:length(y)] (the
+# deterministic analog of ffbs_sample!: same forward filter + backward recursion
+# but without the innovation draw). Used by the MAP/ICM fit.
+function kalman_smooth_mean!(g, ws::OUWork, y, t, ρ, σ2g, v)
+    n = length(y); kalman_forward!(ws, y, t, ρ, σ2g, v)
+    a=ws.a; R=ws.R; m=ws.m; P=ws.P
+    @inbounds begin
+        g[n] = m[n]
+        for i in n-1:-1:1
+            φ = exp(-(t[i+1]-t[i])/ρ); J = φ*P[i]/R[i+1]
+            g[i] = m[i] + J*(g[i+1] - a[i+1])
+        end
+    end
+    g
+end
+
 # Suffix marginal loglik into out[1:length(y)] (segment ENDING at n), via the
 # time-reversed filter; reversed series staged in ws.yr/tr/vr.
 function seg_cumll_bwd!(out, ws::OUWork, y, t, ρ, σ2g, v)
