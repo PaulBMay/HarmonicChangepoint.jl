@@ -31,6 +31,7 @@ export fit_map_mv
 # (works for both the pwlr and UK/OU-GP fits).
 include("query.jl")
 export query_posterior
+export get_fit
 export gpred
 
 end

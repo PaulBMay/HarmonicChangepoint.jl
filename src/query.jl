@@ -62,6 +62,57 @@ function query_posterior(S::NamedTuple, t::AbstractVector, ρ::Real, tq::Real;
     samples ? (value = val, sin = sinc, cos = cosc) : _collapse(val, sinc, cosc)
 end
 
+# ---- Fitted curves at arbitrary times (UK / OU-GP fit) ----------------------
+# Reconstructs, per band, the fitted mean at each query time `tq` (days):
+#   trend(tq)       = intercept + g(tq)                       (within-segment trend)
+#   fit(tq)         = trend(tq) + Σ_f sin_f·sinpi(2·f·tq/P)
+#                                    + cos_f·cospi(2·f·tq/P)    (trend + harmonics)
+# The harmonic basis is built with `harmonicdesign` so it matches exactly the
+# design the model was fit against (same period `P` and frequency convention).
+# `query_posterior` supplies the trend `value` and the sin/cos coefficients.
+#
+# Returns a NamedTuple (trend, fit):
+#   samples=false (default): posterior expectations
+#       trend :: Matrix            r × length(tq)   (bands × query times)
+#       fit   :: Matrix            r × length(tq)
+#   samples=true: full per-draw posterior (extra trailing sample dimension)
+#       trend :: Array{Float64,3}  r × length(tq) × nsamps
+#       fit   :: Array{Float64,3}  r × length(tq) × nsamps
+function get_fit(S::NamedTuple, t::AbstractVector, ρ::Real, period::Real,
+                 tq::AbstractVector; samples::Bool = false)
+    p, r, _, ns = size(S.β)
+    nfreqs = (p - 1) ÷ 2
+    ntq = length(tq)
+    # Harmonic basis at the query times, harmonic columns only (drop intercept/slope):
+    # H[:, 2f-1] = sinpi(2f·tq/P), H[:, 2f] = cospi(2f·tq/P), matching the fit design.
+    H = harmonicdesign(collect(tq), period, nfreqs; intercept = false, slope = false)
+
+    if samples
+        trend = zeros(r, ntq, ns); fit = zeros(r, ntq, ns)
+        for i in 1:ntq
+            q = query_posterior(S, t, ρ, tq[i]; samples = true)  # value r×ns, sin/cos r×nfreqs×ns
+            trend[:, i, :] .= q.value
+            fit[:, i, :]   .= q.value
+            for f in 1:nfreqs
+                @views fit[:, i, :] .+= q.sin[:, f, :] .* H[i, 2*f-1] .+
+                                        q.cos[:, f, :] .* H[i, 2*f]
+            end
+        end
+        return (trend = trend, fit = fit)
+    end
+
+    trend = zeros(r, ntq); fit = zeros(r, ntq)
+    for i in 1:ntq
+        q = query_posterior(S, t, ρ, tq[i])              # value r, sin/cos r×nfreqs
+        trend[:, i] .= q.value
+        fit[:, i]   .= q.value
+        for f in 1:nfreqs
+            @views fit[:, i] .+= q.sin[:, f] .* H[i, 2*f-1] .+ q.cos[:, f] .* H[i, 2*f]
+        end
+    end
+    (trend = trend, fit = fit)
+end
+
 # ---- pwlr fit (the `samples` NamedTuple returned by `pwlr`) ------------------
 # Dispatch: the second positional argument is the scalar query time `t_query`
 # (used for the slope term); `t_idx` is the query's index into the fitted series
